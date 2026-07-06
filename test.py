@@ -1,4 +1,4 @@
-import diir_quic
+import iir_quic
 import numpy as np
 
 # generate sample from tridiagonal precision matrix
@@ -16,6 +16,6 @@ L = np.linalg.cholesky(Sigma_Inv)
 Y = np.linalg.solve(L.T,np.random.randn(n,m))
 S = np.cov(Y)
 
-X, f_val_list, KKT_list, time_list = diir_quic.diir_quic(S, 0.1)
+X, f_val_list, KKT_list, time_list = iir_quic.iir_quic(S, 0.1)
 
 print(f"{'Pass the test' if np.isclose(f_val_list[-1], 616.3827024900871) else 'Failed the test'}")
