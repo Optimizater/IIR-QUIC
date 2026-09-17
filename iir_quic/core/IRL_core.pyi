@@ -12,7 +12,7 @@ def quic(
     L: np.ndarray,
     pathLen: int,
     path: np.ndarray,
-    tol: float, msg: int, max_iter: int, 
+    tol: float, vartheta: float, msg: int, max_iter: int, 
     X: np.ndarray, 
     W: np.ndarray,
     opt: np.ndarray,

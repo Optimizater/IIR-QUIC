@@ -1,6 +1,6 @@
 import numpy as np
 cimport numpy as np
-np.import_array()  # initialize NumPy C-API
+np.import_array()  # 初始化 NumPy C-API
 
 from libcpp.vector cimport vector
 from libcpp cimport bool
@@ -19,8 +19,8 @@ cdef extern from "<Eigen/Dense>" namespace "Eigen":
         Map(double* data, int rows, int cols) except +
 
 cdef extern from "numpy_eigen.hpp":
-    MatrixXd numpy_to_eigen(np.ndarray[np.float64_t, ndim=2] arr)
-    np.ndarray[np.float64_t, ndim=2] eigen_to_numpy(const MatrixXd& mat)
+    MatrixXd numpy_to_eigen(np.ndarray[np.float64_t, ndim=2] arr)  # 输入转换
+    np.ndarray[np.float64_t, ndim=2] eigen_to_numpy(const MatrixXd& mat)  # 输出转换
 
 cdef extern from "lqcov.hpp":
     cdef cppclass LqCov:

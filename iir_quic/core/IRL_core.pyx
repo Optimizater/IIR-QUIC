@@ -11,7 +11,7 @@ cdef extern from "QUIC.h":
 # 	  uint32_t* iter, double* dGap)
         void QUIC(char mode, uint32_t &p, const double *S, double *Lambda0,
             uint32_t &pathLen, const double *path, double &tol,
-            int32_t &msg, uint32_t &maxIter,
+            double &vartheta, int32_t &msg, uint32_t &maxIter,
             double *X, double *W, double *opt, double *cputime,
             uint32_t *iter, double *dGap, double *info_list)
 
@@ -21,7 +21,7 @@ def quic(char* mode, int p,
         np.ndarray[np.float64_t, ndim=2, mode='c'] L,
         int pathLen,
         np.ndarray[np.float64_t, ndim=1, mode='c'] path,
-        double tol, int msg, int max_iter, 
+        double tol, double vartheta, int msg, int max_iter, 
         np.ndarray[np.float64_t, ndim=2, mode='c'] X, 
         np.ndarray[np.float64_t, ndim=2, mode='c'] W,
         np.ndarray[np.float64_t, ndim=1, mode='c'] opt,
@@ -38,7 +38,7 @@ def quic(char* mode, int p,
     cdef uint32_t _max_iter = max_iter
     cdef uint32_t* _iter = <uint32_t*> iter.data
 
-    QUIC(mode[0], _p, &S[0,0], &L[0,0], _pathLen, &path[0], tol, _msg, _max_iter, 
+    QUIC(mode[0], _p, &S[0,0], &L[0,0], _pathLen, &path[0], tol, vartheta, _msg, _max_iter, 
                 &X[0,0], &W[0,0], &opt[0], &cputime[0], &_iter[0], &dGap[0], &info_list[0])
 
     return

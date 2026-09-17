@@ -53,7 +53,8 @@ from . import IRL_core
 import numpy as np
 
 def quic(
-    S, L, mode="default", tol=1e-6, max_iter=1000, X0=None, W0=None, path=None, msg=0
+    S, L, mode="default", tol=1e-6, max_iter=1000, X0=None, W0=None, path=None, msg=0,
+    vartheta=0.1
 ):
     """
     Args:
@@ -77,10 +78,15 @@ def quic(
         path:In "path" mode, an array of float values for scaling L.
 
         msg:Verbosity level.
+
+        vartheta:Inexact inner-solver acceptance parameter in $(0, 1/2)$.
     """
 
     assert mode in ["default", "path", "trace"], (
         "QUIC:arguments\n" + "Invalid mode, use: 'default', 'path' or 'trace'."
+    )
+    assert 0.0 < vartheta < 0.5, (
+        "QUIC:arguments\n" + "Expected vartheta to be in (0, 0.5)."
     )
 
     # Empircal covariance matrix S
@@ -197,6 +203,7 @@ def quic(
         pathLen,
         path,
         tol,
+        vartheta,
         msg,
         max_iter,
         X,

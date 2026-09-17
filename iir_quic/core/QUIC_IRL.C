@@ -244,20 +244,38 @@ static double projLogDet(unsigned long p, const double *S,
 
 double cptDiff_F_Norm(const double *A, const double *B, uint32_t p)
 {
-	double maxNum = 0.0;  // inf norm
+	double sumSquares = 0.0;
 
 	for (uint32_t i = 0; i < p; ++i)
 	{
-		for (uint32_t j = i; j < p; ++j)
+		for (uint32_t j = 0; j <= i; ++j)
 		{
-			// 计算矩阵 A 和 B 的差值 |A[i][j] - B[i][j]|
-			maxNum = std::max(maxNum, std::fabs(A[i * p + j] - B[i * p + j]));
+			double difference = A[i * p + j] - B[i * p + j];
+			sumSquares += (i == j ? 1.0 : 2.0) * difference * difference;
 		}
 	}
 
-	return maxNum * p;
+	return sqrt(sumSquares);
 }
 
+static double absoluteRowSumBound(const double *X, uint32_t p)
+{
+	double bound = 0.0;
+
+	for (uint32_t i = 0; i < p; ++i)
+	{
+		double rowSum = 0.0;
+		for (uint32_t j = 0; j < p; ++j)
+		{
+			uint32_t row = std::max(i, j);
+			uint32_t column = std::min(i, j);
+			rowSum += fabs(X[row * p + column]);
+		}
+		bound = std::max(bound, rowSum);
+	}
+
+	return bound;
+}
 
 #define QUIC_MSG_NO 0
 #define QUIC_MSG_MIN 1
@@ -274,7 +292,7 @@ double cptDiff_F_Norm(const double *A, const double *B, uint32_t p)
 // 		  uint32_t *iter, double *dGap)
 void QUIC(char mode, uint32_t &p, const double *S, double *Lambda0,
 	uint32_t &pathLen, const double *path, double &tol,
-	int32_t &msg, uint32_t &maxIter,
+	double &vartheta, int32_t &msg, uint32_t &maxIter,
 	double *X, double *W, double *opt, double *cputime,
 	uint32_t *iter, double *dGap, double *info_list)
 {
@@ -345,6 +363,7 @@ void QUIC(char mode, uint32_t &p, const double *S, double *Lambda0,
 
 	double *X_0 = (double *)malloc(p * p * sizeof(double));
 	memcpy(X_0, X, sizeof(double) * p * p);
+	double x0RowSumBound = absoluteRowSumBound(X_0, p);
 
 	unsigned long pathIdx = 0;
 	unsigned long NewtonIter = 1;
@@ -353,6 +372,8 @@ void QUIC(char mode, uint32_t &p, const double *S, double *Lambda0,
 		double normD = 0.0;
 		double diffD = 0.0;
 		double subgrad = 1e+15;
+		double subgradSq = 0.0;
+		bool subgradAtPrevIterate = false;
 		if (NewtonIter == 1 && IsDiag(p, X))
 		{
 			if (msg >= QUIC_MSG_NEWTON)
@@ -370,6 +391,7 @@ void QUIC(char mode, uint32_t &p, const double *S, double *Lambda0,
 			memset(U, 0, p * p * sizeof(double));
 			memset(D, 0, p * p * sizeof(double));
 			subgrad = 0.0;
+			subgradSq = 0.0;
 			for (unsigned long k = 0, i = 0; i < p; i++, k += p)
 			{
 				for (unsigned long j = 0; j <= i; j++)
@@ -387,10 +409,14 @@ void QUIC(char mode, uint32_t &p, const double *S, double *Lambda0,
 							g -= Lambda[k + j];
 						else
 							g = fabs(g) - Lambda[k + j];
-						subgrad += fabs(g);
+						// Frobenius norm of the symmetric residual: the
+						// off-diagonal entries are stored once.
+						subgradSq += (i == j ? 1.0 : 2.0) * g * g;
 					}
 				}
 			}
+			subgrad = sqrt(subgradSq);
+			subgradAtPrevIterate = true;
 			info_list[2] = numActive;
 
 			if (msg >= QUIC_MSG_NEWTON)
@@ -597,9 +623,38 @@ void QUIC(char mode, uint32_t &p, const double *S, double *Lambda0,
 			}
 		}
 
+		// The residual above was computed at the previous inner iterate, while
+		// W already holds the inverse of the updated X.  Re-evaluate it at the
+		// updated point so that the acceptance test matches the manuscript,
+		// which evaluates dist(0, dQ_k(Z)) at the returned Z.
+		if (subgradAtPrevIterate)
+		{
+			subgradSq = 0.0;
+			for (unsigned long k = 0, i = 0; i < p; i++, k += p)
+			{
+				for (unsigned long j = 0; j <= i; j++)
+				{
+					double g = S[k + j] - W[k + j];
+					if (fabs(X[k + j]) > EPS || (fabs(g) > Lambda[k + j]))
+					{
+						if (X[k + j] > 0)
+							g += Lambda[k + j];
+						else if (X[k + j] < 0)
+							g -= Lambda[k + j];
+						else
+							g = fabs(g) - Lambda[k + j];
+						subgradSq += (i == j ? 1.0 : 2.0) * g * g;
+					}
+				}
+			}
+			subgrad = sqrt(subgradSq);
+		}
+
 		// Check for convergence.
-		// if (subgrad * alpha >= l1normX * tol && (fabs((fX - fXprev) / fX) >= EPS))
-		if (subgrad > alpha * cptDiff_F_Norm(X, X_0, p))
+		double curvatureBound = std::max(x0RowSumBound,
+			absoluteRowSumBound(X, p));
+		double m_k = 1.0 / (curvatureBound * curvatureBound);
+		if (subgrad > vartheta * m_k * cptDiff_F_Norm(X, X_0, p))
 		{
 			if (msg >= QUIC_MSG_MIN)
 			{

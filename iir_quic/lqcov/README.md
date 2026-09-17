@@ -18,11 +18,19 @@ sudo apt-get install libeigen3-dev
 
    In short, you need to download the compressed package, unzip it locally and modify the `eigen_path` in [setup.py](setup.py) to your folder path where you unzipped the Eigen library.
 
-Then, you can build the module by running the following command in the terminal:
+Then build the module with the interpreter of the virtual environment set up in the
+[top-level README](../../README.md), from inside this directory:
 
 ```bash
-# cd lqcov
-python setup.py build_ext --inplace
+cd iir_quic/lqcov
+../../.venv/bin/python setup.py build_ext --inplace
+```
+
+On Windows the MinGW-w64 `g++` toolchain has to be selected explicitly:
+
+```powershell
+cd iir_quic\lqcov
+..\..\.venv\Scripts\python.exe setup.py build_ext --inplace --compiler=mingw32
 ```
 
 # How to use
@@ -36,8 +44,8 @@ You can use either version by importing the corresponding module in your Python 
 
 ```python
 # Example usage
-import diir_quic.lqcov.lqcov as lqcov_m1
-import diir_quic.lqcov.lqcov_cython as lqcov_m2
+import iir_quic.lqcov.lqcov as lqcov_m1
+import iir_quic.lqcov.lqcov_cython as lqcov_m2
 ```
 
 Each version provides the same interface:

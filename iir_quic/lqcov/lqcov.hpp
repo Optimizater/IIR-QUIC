@@ -44,9 +44,7 @@ private:
     MatrixXd get_Omega_inv(const MatrixXd& V_inv, const VectorXd& u_plus, double w_plus) const;
     MatrixXd get_V_inv(const MatrixXd& Omega_inv_perm) const;
     double objective_function(const MatrixXd& Omega, const MatrixXd& S, double q) const;
-    double objective_function2(const MatrixXd& Omega, const MatrixXd& S, double q) const;
     double kkt_condition(const MatrixXd& Omega, const MatrixXd& Omega_inv, const MatrixXd& S, double q, int p) const;
-    double kkt_condition2(const MatrixXd& Omega, const MatrixXd& Omega_inv, const MatrixXd& S, double q, int p) const;
 };
 
 #endif // LQCOV_HPP

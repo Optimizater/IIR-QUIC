@@ -1,508 +1,388 @@
-'''
-DIIR-QUIC main program
-'''
+"""
+IIR-QUIC: Inexact Iteratively Reweighted QUIC.
 
-import numpy as np
+Solves min_X {-logdet(X) + tr(SX) + rho * Phi(X)} with nonconvex regularizers
+(lp quasi-norm, SCAD, MCP) by alternating weight updates and inexact weighted
+l1-regularized QUIC subproblem solves (Algorithm 1 of the manuscript).
+
+All subproblems are solved by iir_quic.core (the inexact inner rule with the
+acceptance parameter vartheta).  When config.OFF_DIAG is True the diagonal
+penalty weights are zeroed (W_ii = 0), matching the off-diagonal problem
+solved by l_pCOV; the objectives and KKT residuals are evaluated with the
+corresponding off-diagonal penalty.
+"""
+
 import time
 
-from . import core as IRL_core
+import numpy as np
 
-from .config import NONZERO
 from . import alg
+from . import core as IRL_core
+from .config import NONZERO, OFF_DIAG
 
 
+def _use_off_diag(zero_diag):
+    return OFF_DIAG if zero_diag is None else zero_diag
+
+
+# FIX: weight functions for SCAD/MCP are parameterised by the regularization
+# parameter rho (their knot / slope), while the lp weights use the exponent p.
+def _weight_scale(penalty: str, modelPara: float, regularizationPara: float) -> float:
+    return modelPara if penalty == "lp" else regularizationPara
+
+
+# --------------------------------------------------------------------------
+# Penalty weights
+# --------------------------------------------------------------------------
 def update_weights(
-    iterate: np.ndarray, perturbation: np.ndarray, modelPara: float
+    iterate: np.ndarray, perturbation: np.ndarray, modelPara: float,
+    zero_diag: bool | None = None,
 ) -> np.ndarray:
-    """
-    Compute the new weights based on the current iterate and perturbation.
-
-    Args:
-      iterate (np.ndarray): Current iterate.
-      perturbation (np.ndarray): Current perturbation.
-      modelPara (float): Parameter for the non-convex regularization term.
-
-    Returns:
-      np.ndarray: Updated weights.
-    """
-    # Ensure that the term (|x_k| + epsilon_k) is not too small by using a lower bound
-
+    """W_ij = p * (|X_ij| + E_ij)^(p-1) for the lp quasi-norm."""
+    zero_diag = _use_off_diag(zero_diag)
     adjustment = np.maximum(np.abs(iterate) + perturbation, 1e-13)
-    return modelPara * np.power(adjustment, modelPara - 1)
+    weight = modelPara * np.power(adjustment, modelPara - 1)
+    if zero_diag:
+        np.fill_diagonal(weight, 0.0)
+    return weight
 
 
 def update_weights_scad(
-    iterate: np.ndarray, perturbation: np.ndarray, lam: float
+    iterate: np.ndarray, perturbation: np.ndarray, lam: float,
+    zero_diag: bool | None = None,
 ) -> np.ndarray:
-    # Ensure that the term (|x_k| + epsilon_k) is not too small by using a lower bound
-
+    """W_ij = phi'(|X_ij| + E_ij) for the SCAD penalty."""
+    zero_diag = _use_off_diag(zero_diag)
     adjustment = np.maximum(np.abs(iterate) + perturbation, 1e-13)
-    return alg.scad_derivative(adjustment, lam)
+    weight = alg.scad_derivative(adjustment, lam)
+    if zero_diag:
+        np.fill_diagonal(weight, 0.0)
+    return weight
 
 
 def update_weights_mcp(
-    iterate: np.ndarray, perturbation: np.ndarray, lam: float
+    iterate: np.ndarray, perturbation: np.ndarray, lam: float,
+    zero_diag: bool | None = None,
 ) -> np.ndarray:
-    # Ensure that the term (|x_k| + epsilon_k) is not too small by using a lower bound
-
+    """W_ij = phi'(|X_ij| + E_ij) for the MCP penalty."""
+    zero_diag = _use_off_diag(zero_diag)
     adjustment = np.maximum(np.abs(iterate) + perturbation, 1e-13)
-    return alg.mcp_derivative(adjustment, lam)
+    weight = alg.mcp_derivative(adjustment, lam)
+    if zero_diag:
+        np.fill_diagonal(weight, 0.0)
+    return weight
+
+
+# --------------------------------------------------------------------------
+# Objectives
+# --------------------------------------------------------------------------
+def _penalty_matrix(X: np.ndarray, zero_diag: bool) -> np.ndarray:
+    pen = np.abs(X)
+    if zero_diag:
+        np.fill_diagonal(pen, 0.0)
+    return pen
 
 
 def objective_function(
-    S: np.ndarray, X: np.ndarray, lam: float, p: float, perturbation: np.ndarray
+    S: np.ndarray, X: np.ndarray, lam: float, p: float,
+    perturbation: np.ndarray, use_perturbation: bool = True,
+    zero_diag: bool | None = None,
 ) -> float:
-    """-logdet(X) + tr(SX) + lam * sum(|X|^p)"""
+    """-logdet(X) + tr(SX) + lam * sum(|X|^p) (with optional smoothing)."""
+    zero_diag = _use_off_diag(zero_diag)
     log_det = np.linalg.slogdet(X)[1]
     trace_term = np.trace(S @ X)
-    lp_term = lam * np.sum(np.power(np.abs(X) + perturbation, p))
-    f_val = -log_det + trace_term + lp_term
-
-    return f_val
+    pen = _penalty_matrix(X, zero_diag)
+    if use_perturbation:
+        pen = pen + perturbation
+    return -log_det + trace_term + lam * np.sum(np.power(pen, p))
 
 
 def objective_function_scad(
-    S: np.ndarray, X: np.ndarray, lam: float, perturbation: np.ndarray
+    S: np.ndarray, X: np.ndarray, lam: float, modelPara: float,
+    perturbation: np.ndarray, use_perturbation: bool = True,
+    zero_diag: bool | None = None,
 ) -> float:
-    """-logdet(X) + tr(SX) + lam * sum(|X|^p)"""
+    """-logdet(X) + tr(SX) + lam * sum phi_SCAD(|X|)."""
+    zero_diag = _use_off_diag(zero_diag)
     log_det = np.linalg.slogdet(X)[1]
     trace_term = np.trace(S @ X)
-    scad_term = lam * alg.matrix_scad(np.abs(X) + perturbation, lam)
-
-    f_val = -log_det + trace_term + scad_term
-
-    return f_val
+    pen = _penalty_matrix(X, zero_diag)
+    if use_perturbation:
+        pen = pen + perturbation
+    return -log_det + trace_term + lam * alg.matrix_scad(pen, lam)
 
 
 def objective_function_mcp(
-    S: np.ndarray, X: np.ndarray, lam: float, perturbation: np.ndarray
+    S: np.ndarray, X: np.ndarray, lam: float, modelPara: float,
+    perturbation: np.ndarray, use_perturbation: bool = True,
+    zero_diag: bool | None = None,
 ) -> float:
-    """-logdet(X) + tr(SX) + lam * sum(|X|^p)"""
+    """-logdet(X) + tr(SX) + lam * sum phi_MCP(|X|)."""
+    zero_diag = _use_off_diag(zero_diag)
     log_det = np.linalg.slogdet(X)[1]
     trace_term = np.trace(S @ X)
-    scad_term = lam * alg.matrix_mcp(np.abs(X) + perturbation, lam)
+    pen = _penalty_matrix(X, zero_diag)
+    if use_perturbation:
+        pen = pen + perturbation
+    return -log_det + trace_term + lam * alg.matrix_mcp(pen, lam)
 
-    f_val = -log_det + trace_term + scad_term
 
-    return f_val
-
-
+# --------------------------------------------------------------------------
+# Stationarity residuals (KKT)
+# --------------------------------------------------------------------------
 def KKT_condition(
-    S: np.ndarray, X: np.ndarray, X_inv: np.ndarray, lam: float, p: float
-):
-    """Stationarity resdual"""
+    S: np.ndarray, X: np.ndarray, X_inv: np.ndarray, lam: float, p: float,
+    zero_diag: bool | None = None,
+) -> float:
+    """Stationarity residual of the lp problem, scaled by the dimension."""
+    zero_diag = _use_off_diag(zero_diag)
     _dim = X.shape[0]
 
-    non_zero_indices = np.where(np.abs(X) > NONZERO)
-    elementwise_product = np.power(np.abs(X[non_zero_indices]), p - 1) * np.sign(
-        X[non_zero_indices]
-    )
-    optRes_unscaled = np.max(
-        np.abs(
-            S[non_zero_indices]
-            - X_inv[non_zero_indices]
-            + lam * p * elementwise_product
-        )
-    )
+    nz = np.abs(X) > NONZERO
+    pen_grad = np.zeros_like(X)
+    pen_grad[nz] = p * np.power(np.abs(X[nz]), p - 1) * np.sign(X[nz])
+    if zero_diag:
+        np.fill_diagonal(pen_grad, 0.0)
 
-    optRes = optRes_unscaled * _dim
+    res = np.abs(S - X_inv + lam * pen_grad)
+    optRes = np.max(res[nz]) * _dim
     return optRes
 
 
-def KKT_condition_scad(S: np.ndarray, X: np.ndarray, X_inv: np.ndarray, lam: float):
-    """Stationarity resdual"""
-    _dim = X.shape[0]
-
-    grad_f: np.ndarray = S - X_inv
-
-    # (3a)
-    non_zero_indices = np.where(np.abs(X) > NONZERO)
-    optRes_unscaled_1 = np.max(
-        np.abs(
-            grad_f[non_zero_indices]
-            + lam
-            * alg.scad_derivative(np.abs(X[non_zero_indices]), lam)
-            * np.sign(X[non_zero_indices])
-        )
-    )
-
-    # (3b)
-    zero_indices = np.where(np.abs(X) <= NONZERO)
-    lambda_sq = lam**2
-    res = np.zeros_like(X[zero_indices])
-
-    mask1 = grad_f[zero_indices] < -lambda_sq
-    res[mask1] = -(grad_f[zero_indices][mask1] + lambda_sq)
-
-    mask2 = grad_f[zero_indices] > lambda_sq
-    res[mask2] = grad_f[zero_indices][mask2] - lambda_sq
-
-    optRes_unscaled_2 = np.max(np.abs(res))
-
-    optRes_unscaled = max(optRes_unscaled_1, optRes_unscaled_2)
-
-    optRes = optRes_unscaled * _dim
-    return optRes
-
-
-def KKT_condition_mcp(S: np.ndarray, X: np.ndarray, X_inv: np.ndarray, lam: float):
-    """Stationarity resdual"""
+def KKT_condition_scad(
+    S: np.ndarray, X: np.ndarray, X_inv: np.ndarray, lam: float,
+    modelPara: float, zero_diag: bool | None = None,
+) -> float:
+    """Stationarity residual of the SCAD problem, scaled by the dimension."""
+    zero_diag = _use_off_diag(zero_diag)
     _dim = X.shape[0]
 
     grad_f: np.ndarray = S - X_inv
 
-    # (3a)
-    non_zero_indices = np.where(np.abs(X) > NONZERO)
+    # (3a) nonzero entries
+    nz = np.abs(X) > NONZERO
+    pen_grad = np.zeros_like(X)
+    pen_grad[nz] = alg.scad_derivative(np.abs(X[nz]), lam) * np.sign(X[nz])
+    if zero_diag:
+        np.fill_diagonal(pen_grad, 0.0)
+
     optRes_unscaled_1 = np.max(
-        np.abs(
-            grad_f[non_zero_indices]
-            + lam
-            * alg.mcp_derivative(np.abs(X[non_zero_indices]), lam)
-            * np.sign(X[non_zero_indices])
-        )
+        np.abs(grad_f[nz] + lam * pen_grad[nz])
     )
 
-    # (3b)
-    zero_indices = np.where(np.abs(X) <= NONZERO)
-    lambda_sq = lam**2
-    res = np.zeros_like(X[zero_indices])
+    # (3b) zero entries: |grad_f| must stay below the flat-tail threshold
+    zr = np.abs(X) <= NONZERO
+    lambda_sq = lam ** 2
+    res = np.zeros_like(X[zr])
 
-    mask1 = grad_f[zero_indices] < -lambda_sq
-    res[mask1] = -(grad_f[zero_indices][mask1] + lambda_sq)
+    mask1 = grad_f[zr] < -lambda_sq
+    res[mask1] = -(grad_f[zr][mask1] + lambda_sq)
 
-    mask2 = grad_f[zero_indices] > lambda_sq
-    res[mask2] = grad_f[zero_indices][mask2] - lambda_sq
+    mask2 = grad_f[zr] > lambda_sq
+    res[mask2] = grad_f[zr][mask2] - lambda_sq
 
-    optRes_unscaled_2 = np.max(np.abs(res))
-
-    optRes_unscaled = max(optRes_unscaled_1, optRes_unscaled_2)
-
-    optRes = optRes_unscaled * _dim
-    return optRes
+    optRes_unscaled = max(optRes_unscaled_1, np.max(np.abs(res)))
+    return optRes_unscaled * _dim
 
 
+def KKT_condition_mcp(
+    S: np.ndarray, X: np.ndarray, X_inv: np.ndarray, lam: float,
+    modelPara: float, zero_diag: bool | None = None,
+) -> float:
+    """Stationarity residual of the MCP problem, scaled by the dimension."""
+    zero_diag = _use_off_diag(zero_diag)
+    _dim = X.shape[0]
 
-def iRL1_simplified2(
+    grad_f: np.ndarray = S - X_inv
+
+    # (3a) nonzero entries
+    nz = np.abs(X) > NONZERO
+    pen_grad = np.zeros_like(X)
+    pen_grad[nz] = alg.mcp_derivative(np.abs(X[nz]), lam) * np.sign(X[nz])
+    if zero_diag:
+        np.fill_diagonal(pen_grad, 0.0)
+
+    # (3a) nonzero entries
+    nz = np.abs(X) > NONZERO
+    optRes_unscaled_1 = np.max(
+        np.abs(grad_f[nz] + lam * pen_grad[nz])
+    )
+
+    # (3b) zero entries
+    zr = np.abs(X) <= NONZERO
+    lambda_sq = lam ** 2
+    res = np.zeros_like(X[zr])
+
+    mask1 = grad_f[zr] < -lambda_sq
+    res[mask1] = -(grad_f[zr][mask1] + lambda_sq)
+
+    mask2 = grad_f[zr] > lambda_sq
+    res[mask2] = grad_f[zr][mask2] - lambda_sq
+
+    optRes_unscaled = max(optRes_unscaled_1, np.max(np.abs(res)))
+    return optRes_unscaled * _dim
+
+
+# --------------------------------------------------------------------------
+# Main loop
+# --------------------------------------------------------------------------
+_WEIGHT_FN = {
+    "lp": update_weights,
+    "scad": update_weights_scad,
+    "mcp": update_weights_mcp,
+}
+_OBJECTIVE_FN = {
+    "lp": objective_function,
+    "scad": objective_function_scad,
+    "mcp": objective_function_mcp,
+}
+_KKT_FN = {
+    "lp": KKT_condition,
+    "scad": KKT_condition_scad,
+    "mcp": KKT_condition_mcp,
+}
+
+
+def iir_quic(
     SampleCov: np.ndarray,
     reduce_para: float,
     perturbationInit: np.ndarray,
     IteratesInit: np.ndarray,
     regularizationPara: float,
     modelPara: float,
+    penalty: str = "lp",
     MaxIter: int = 3000,
     tolerance: float = 1e-5,
-    alpha=0.5,
-    Sigma=None,
-    msg=True,
-) -> tuple[np.ndarray, int, list[float], list[float], list[float]]:
+    vartheta: float = 0.1,
+    inner_max_iter: int = 2000,
+    zero_diag: bool | None = None,
+    msg: bool = False,
+) -> dict:
     """
-    Main loop for the Extrapolated Proximal Iteratively Reweighted L1 algorithm.
+    Run IIR-QUIC (Algorithm 1 of the manuscript).
 
     Args:
-        SampleCov(np.ndarray):          The empirical nxn covariance matrix.
-        reducePara (float):             Epsilon decay factor, which belongs to (0,1).
-        perturbationInit (np.ndarray):  Initial epsilon values.
-        IteratesInit (np.ndarray):      Initial point for the iterates.
-        regularizationPara (float):     Regularization parameter.
-        modelPara (float):              Parameter for the non-convex regularization term (0 < p < 1).
-        MaxIter (int):                  Maximum number of iterations.
-        tolerance (float):              Tolerance for the stopping criterion.
-        alpha(float):                   Dampled step para, which belongs to (0,1).
-        Sigma(np.ndarray):              **(useless para)** Σ of original question, expected np.ndarray format, it will be ignored if `Sigma = None`
-        msg(bool):                      print message if `msg=True`
+        SampleCov (np.ndarray):      Empirical n x n covariance matrix.
+        reduce_para (float):         Perturbation decay factor mu in (0,1).
+        perturbationInit (ndarray):  Initial perturbation matrix E^0.
+        IteratesInit (ndarray):      Initial point X^0 (positive definite).
+        regularizationPara (float):  Regularization parameter rho.
+        modelPara (float):           Model parameter p in (0,1] (unused for
+                                     "scad"/"mcp", whose weights use rho).
+        penalty (str):               "lp", "scad" or "mcp".
+        MaxIter (int):               Maximum number of outer iterations.
+        tolerance (float):           KKT stopping tolerance.
+        vartheta (float):            Inexact inner acceptance parameter in (0, 0.5).
+        inner_max_iter (int):        Max inner QUIC Newton iterations.
+        zero_diag (bool | None):     Zero the diagonal penalty weights; None
+                                     follows the global config.OFF_DIAG.
+        msg (bool):                  Print per-iteration information if True.
+
+    Returns:
+        dict with keys X, f_val_list, f_val_list2, KKT_list, time_list,
+        nnz_list, nAct_list, fix_norm_list, eps_norm_list, iterations.
     """
+    if penalty not in _WEIGHT_FN:
+        raise ValueError(f"penalty must be one of {list(_WEIGHT_FN)}")
+    if not 0.0 < vartheta < 0.5:
+        raise ValueError("vartheta must be in (0, 0.5)")
+    zero_diag = _use_off_diag(zero_diag)
+    weight_fn = _WEIGHT_FN[penalty]
+    objective_fn = _OBJECTIVE_FN[penalty]
+    kkt_fn = _KKT_FN[penalty]
 
-    # Initialization
-    iterate = np.copy(IteratesInit)
-    iterate = iterate.astype(np.float64)
+    SampleCov = np.ascontiguousarray(SampleCov, dtype=np.float64)
+    iterate = np.ascontiguousarray(IteratesInit, dtype=np.float64).copy()
+    iterate_inv = np.linalg.inv(iterate)
+    perturbation = np.asarray(perturbationInit, dtype=np.float64).copy()
+    _dim = iterate.shape[0]
 
-    # Using Cholesky decomposition
-    L = np.linalg.cholesky(iterate)
-    L_inv = np.linalg.inv(L)
+    f_val_list = [
+        objective_fn(SampleCov, iterate, regularizationPara, modelPara,
+                     perturbation, zero_diag=zero_diag)
+    ]
+    f_val_list2 = [
+        objective_fn(SampleCov, iterate, regularizationPara, modelPara,
+                     perturbation, use_perturbation=False, zero_diag=zero_diag)
+    ]
+    KKT_list = [
+        kkt_fn(SampleCov, iterate, iterate_inv, regularizationPara, modelPara,
+               zero_diag=zero_diag)
+    ]
+    nnz_list = [np.sum(np.abs(iterate) > NONZERO)]
+    nAct_list = []
+    fix_norm_list = [np.nan]
+    eps_norm_list = [np.max(np.abs(perturbation)) * _dim]
+    time_list = [0.0]
 
-    # Compute the inverse of iterate
-    iterate_inv = L_inv.T @ L_inv
-
-    perturbation = np.copy(perturbationInit)
-    cnt = 0
-
-    f_val_list = []
-    KKT_list = []
-    time_list = []
-
-    f_val_list.append(
-        objective_function(
-            SampleCov, iterate, regularizationPara, modelPara, perturbation
-        )
-    )
-
-    start_time = time.time()
-    # Iterative loop
-    while True:
-        # Step 1: Compute the new weights (tuning parameter) how to adjust this weights?
-        weight = update_weights(iterate, perturbation, modelPara)
-
-        # Step 2: Solve the subproblem
-        msg_quic = 0
+    start_time = time.perf_counter()
+    for outer_iter in range(MaxIter):
         if msg:
-            print(f"============ iter: {cnt} ============")
-            msg_quic = 2
+            print(f"============ iter: {outer_iter} ============")
 
-        [iterateNext, iterateNextInv, _, _, _, _, _, _, _, _] = IRL_core.quic(
-            S=SampleCov,
-            L=regularizationPara * weight,
-            mode="default",
-            max_iter=2000,
-            X0=iterate,
-            W0=iterate_inv,
-            msg=msg_quic,
+        weight = np.ascontiguousarray(
+            weight_fn(iterate, perturbation, _weight_scale(penalty, modelPara, regularizationPara),
+                      zero_diag=zero_diag),
+            dtype=np.float64,
         )
-
-        iterateNext = (1.0 - alpha) * iterate + alpha * iterateNext
-
-        # Check for convergence: KKT condition
-        optRes = KKT_condition(
-            SampleCov, iterateNext, iterateNextInv, regularizationPara, modelPara
+        lam_matrix = np.ascontiguousarray(
+            regularizationPara * weight, dtype=np.float64
         )
-        KKT_list.append(optRes)
-        time_list.append(time.time() - start_time)
-
-        if msg:
-            print(f"===== f_val: {f_val_list[-1]}, KKT: {optRes} =====")
-
-        if (optRes < tolerance) or cnt >= MaxIter:
-            break
-
-        # Step 3: Update the perturbation
-        perturbation = (1.0 - alpha) * perturbation + alpha * reduce_para * perturbation
-
-        f_val_list.append(
-            objective_function(
-                SampleCov, iterateNext, regularizationPara, modelPara, perturbation
+        iterate_next, iterate_next_inv, _, _, _, _, _, _, numActive, stepsize = (
+            IRL_core.quic(
+                S=SampleCov,
+                L=lam_matrix,
+                mode="default",
+                max_iter=inner_max_iter,
+                X0=iterate,
+                W0=iterate_inv,
+                msg=2 if msg else 0,
+                vartheta=vartheta,
             )
         )
 
-        # Step 4: Prepare for the next iteration
-        iterate = np.copy(iterateNext)
-        iterate_inv = np.copy(iterateNextInv)
-        cnt += 1
+        iterate_next = np.asarray(iterate_next, dtype=np.float64)
+        iterate_next_inv = np.asarray(iterate_next_inv, dtype=np.float64)
+        nAct_list.append(numActive)
+        fix_norm_list.append(np.max(np.abs(iterate_next - iterate)) * _dim)
 
-    output = (iterate, cnt, f_val_list, KKT_list, time_list)
+        iterate = iterate_next.copy()
+        iterate_inv = iterate_next_inv.copy()
 
-    return output
+        perturbation = reduce_para * perturbation
 
-
-def iRL1_scad(
-    SampleCov: np.ndarray,
-    reduce_para: float,
-    perturbationInit: np.ndarray,
-    IteratesInit: np.ndarray,
-    regularizationPara: float,
-    modelPara: float,
-    MaxIter: int = 3000,
-    tolerance: float = 1e-5,
-    alpha=0.5,
-    Sigma=None,
-    msg=True,
-) -> tuple[np.ndarray, int, list[float], list[float], list[float]]:
-    """
-    Main loop for the Extrapolated Proximal Iteratively Reweighted L1 algorithm. (SCAD)
-
-    Args:
-        SampleCov(np.ndarray):          The empirical nxn covariance matrix.
-        reducePara (float):             Epsilon decay factor, which belongs to (0,1).
-        perturbationInit (np.ndarray):  Initial epsilon values.
-        IteratesInit (np.ndarray):      Initial point for the iterates.
-        regularizationPara (float):     Regularization parameter.
-        modelPara (float):              **(useless para)** Parameter for the non-convex regularization term (0 < p < 1).
-        MaxIter (int):                  Maximum number of iterations.
-        tolerance (float):              Tolerance for the stopping criterion.
-        alpha(float):                   Dampled step para, which belongs to (0,1).
-        Sigma(np.ndarray):              **(useless para)** Σ of original question, expected np.ndarray format, it will be ignored if `Sigma = None`
-        msg(bool):                      print message if `msg=True`
-    """
-
-    # Initialization
-    iterate = np.copy(IteratesInit)
-    iterate = iterate.astype(np.float64)
-
-    # Using Cholesky decomposition
-    L = np.linalg.cholesky(iterate)
-    L_inv = np.linalg.inv(L)
-
-    # Compute the inverse of iterate
-    iterate_inv = L_inv.T @ L_inv
-
-    perturbation = np.copy(perturbationInit)
-    cnt = 0
-
-    KKT_list = []
-    time_list = []
-    f_val_list = []
-
-    f_val_list.append(
-        objective_function_scad(SampleCov, iterate, regularizationPara, perturbation)
-    )
-
-    start_time = time.time()
-    # Iterative loop
-    while True:
-        # Step 1: Compute the new weights (tuning parameter) how to adjust this weights?
-        weight = update_weights_scad(iterate, perturbation, regularizationPara)
-
-        # Step 2: Solve the subproblem
-        msg_quic = 0
-        if msg:
-            print(f"============ iter: {cnt} ============")
-            msg_quic = 2
-
-        [iterateNext, iterateNextInv, _, _, _, _, _, _, _, _] = IRL_core.quic(
-            S=SampleCov,
-            L=regularizationPara * weight,
-            mode="default",
-            max_iter=2000,
-            X0=iterate,
-            W0=iterate_inv,
-            msg=msg_quic,
+        kkt_value = kkt_fn(SampleCov, iterate, iterate_inv, regularizationPara,
+                           modelPara, zero_diag=zero_diag)
+        KKT_list.append(kkt_value)
+        f_val_list.append(
+            objective_fn(SampleCov, iterate, regularizationPara, modelPara,
+                         perturbation, zero_diag=zero_diag)
         )
-
-        iterateNext = (1.0 - alpha) * iterate + alpha * iterateNext
-
-        # Check for convergence: KKT condition
-        optRes = KKT_condition_scad(
-            SampleCov, iterateNext, iterateNextInv, regularizationPara
+        f_val_list2.append(
+            objective_fn(SampleCov, iterate, regularizationPara, modelPara,
+                         perturbation, use_perturbation=False,
+                         zero_diag=zero_diag)
         )
-        KKT_list.append(optRes)
-        time_list.append(time.time() - start_time)
+        nnz_list.append(np.sum(np.abs(iterate) > NONZERO))
+        eps_norm_list.append(np.max(np.abs(perturbation)) * _dim)
+        time_list.append(time.perf_counter() - start_time)
 
         if msg:
-            print(f"===== KKT: {optRes} =====")
+            print(f"===== KKT: {kkt_value} =====")
 
-        if (optRes < tolerance) or cnt >= MaxIter:
+        if kkt_value < tolerance:
             break
 
-        # Step 3: Update the perturbation
-        perturbation = (1.0 - alpha) * perturbation + alpha * reduce_para * perturbation
-
-        f_val_list.append(
-            objective_function_scad(
-                SampleCov, iterateNext, regularizationPara, perturbation
-            )
-        )
-
-        # Step 4: Prepare for the next iteration
-        iterate = np.copy(iterateNext)
-        iterate_inv = np.copy(iterateNextInv)
-        cnt += 1
-
-    output = (iterate, cnt, KKT_list, time_list, f_val_list)
-
-    return output
-
-
-def iRL1_mcp(
-    SampleCov: np.ndarray,
-    reduce_para: float,
-    perturbationInit: np.ndarray,
-    IteratesInit: np.ndarray,
-    regularizationPara: float,
-    modelPara: float,
-    MaxIter: int = 3000,
-    tolerance: float = 1e-5,
-    alpha=0.5,
-    Sigma=None,
-    msg=True,
-) -> tuple[np.ndarray, int, list[float], list[float], list[float]]:
-    """
-    Main loop for the Extrapolated Proximal Iteratively Reweighted L1 algorithm. (SCAD)
-
-    Args:
-        SampleCov(np.ndarray):          The empirical nxn covariance matrix.
-        reducePara (float):             Epsilon decay factor, which belongs to (0,1).
-        perturbationInit (np.ndarray):  Initial epsilon values.
-        IteratesInit (np.ndarray):      Initial point for the iterates.
-        regularizationPara (float):     Regularization parameter.
-        modelPara (float):              **(useless para)** Parameter for the non-convex regularization term (0 < p < 1).
-        MaxIter (int):                  Maximum number of iterations.
-        tolerance (float):              Tolerance for the stopping criterion.
-        alpha(float):                   Dampled step para, which belongs to (0,1).
-        Sigma(np.ndarray):              **(useless para)** Σ of original question, expected np.ndarray format, it will be ignored if `Sigma = None`
-        msg(bool):                      print message if `msg=True`
-    """
-
-    # Initialization
-    iterate = np.copy(IteratesInit)
-    iterate = iterate.astype(np.float64)
-
-    # Using Cholesky decomposition
-    L = np.linalg.cholesky(iterate)
-    L_inv = np.linalg.inv(L)
-
-    # Compute the inverse of iterate
-    iterate_inv = L_inv.T @ L_inv
-
-    perturbation = np.copy(perturbationInit)
-    cnt = 0
-
-    KKT_list = []
-    time_list = []
-    f_val_list = []
-
-    f_val_list.append(
-        objective_function_mcp(SampleCov, iterate, regularizationPara, perturbation)
-    )
-
-    start_time = time.time()
-    # Iterative loop
-    while True:
-        # Step 1: Compute the new weights (tuning parameter) how to adjust this weights?
-        weight = update_weights_mcp(iterate, perturbation, regularizationPara)
-
-        # Step 2: Solve the subproblem
-        msg_quic = 0
-        if msg:
-            print(f"============ iter: {cnt} ============")
-            msg_quic = 2
-
-        [iterateNext, iterateNextInv, _, _, _, _, _, _, _, _] = IRL_core.quic(
-            S=SampleCov,
-            L=regularizationPara * weight,
-            mode="default",
-            max_iter=2000,
-            X0=iterate,
-            W0=iterate_inv,
-            msg=msg_quic,
-        )
-
-        iterateNext = (1.0 - alpha) * iterate + alpha * iterateNext
-
-        # Check for convergence: KKT condition
-        optRes = KKT_condition_mcp(
-            SampleCov, iterateNext, iterateNextInv, regularizationPara
-        )
-        KKT_list.append(optRes)
-        time_list.append(time.time() - start_time)
-
-        if msg:
-            print(f"===== KKT: {optRes} =====")
-
-        if (optRes < tolerance) or cnt >= MaxIter:
-            break
-
-        # Step 3: Update the perturbation
-        perturbation = (1.0 - alpha) * perturbation + alpha * reduce_para * perturbation
-
-        f_val_list.append(
-            objective_function_mcp(
-                SampleCov, iterateNext, regularizationPara, perturbation
-            )
-        )
-
-        # Step 4: Prepare for the next iteration
-        iterate = np.copy(iterateNext)
-        iterate_inv = np.copy(iterateNextInv)
-        cnt += 1
-
-    output = (iterate, cnt, KKT_list, time_list, f_val_list)
-
-    return output
+    return {
+        "X": iterate,
+        "f_val_list": f_val_list,
+        "f_val_list2": f_val_list2,
+        "KKT_list": KKT_list,
+        "time_list": time_list,
+        "nnz_list": nnz_list,
+        "nAct_list": nAct_list,
+        "fix_norm_list": fix_norm_list,
+        "eps_norm_list": eps_norm_list,
+        "iterations": len(KKT_list) - 1,
+    }

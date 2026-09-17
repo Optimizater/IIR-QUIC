@@ -4,15 +4,23 @@ This module provides tools for printing debugging information and some parameter
 
 import datetime
 
+# Off by default so that importing the package stays quiet; the experiment
+# repository (pyquic-master) runs with both flags set to True.
 DEBUG = False     # A flag to enable or disable debug mode.
 MAKE_LOG = False  # A flag to enable or disable log.
 
 NONZERO = 1e-8
+# NONZERO = 1e-14
 SCAD_A = 3.7
 MCP_GAMMA = 2
 EBIC_GAMMA = 0.5
 
 RAND_SEED = 1
+
+# Zero the diagonal penalty weights (W_ii = 0) so that the regularizer only
+# covers off-diagonal entries.  This is the variant used for a fair comparison
+# against l_pCOV, which solves the off-diagonal problem by construction.
+OFF_DIAG = True
 
 
 def printDecorate(func, color="black"):

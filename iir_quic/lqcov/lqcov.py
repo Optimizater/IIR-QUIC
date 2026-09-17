@@ -28,7 +28,6 @@ def lq_threshold(z: float, lambda_i: float, q: float, max_iter=2000, tol=1e-4):
         else:
             _beta = beta_lambda
             beta = beta_lambda
-            
             for _ in range(max_iter):  # Fixed-point iteration
                 beta = abs(z) - lambda_i * q * _beta ** (q - 1)
                 if abs(_beta - beta) < tol:
@@ -135,21 +134,6 @@ def objective_function(
     return -L
 
 
-def objective_function2(
-    Omega: np.ndarray, S: np.ndarray, lambda_: float, q: float
-) -> float:
-    """-log(det(Omega)) + trace(S @ Omega) + lambda * sum(abs(Omega) ** q)"""
-    log_det = np.linalg.slogdet(Omega)[1]
-    trace = np.trace(Omega @ S)
-    Omega_d = Omega.copy()
-    # np.fill_diagonal(Omega_d, 0.0)
-    lq_term = lambda_ * np.sum(np.power(np.abs(Omega_d), q))
-
-    L = log_det - trace - lq_term
-
-    return -L
-
-
 def indicator_function(condition):
     return 1 if condition else 0
 
@@ -167,28 +151,6 @@ def check_positive_definite(matrix: np.ndarray) -> bool:
         return True
     except np.linalg.LinAlgError:
         return False
-
-def KKT_condition(
-    S: np.ndarray, X: np.ndarray, X_inv: np.ndarray, lam: float, p: float
-):
-    """Stationarity resdual"""
-    _dim = X.shape[0]
-
-    non_zero_indices = np.where(np.abs(X) > NONZERO)
-    elementwise_product = np.power(np.abs(X[non_zero_indices]), p - 1) * np.sign(
-        X[non_zero_indices]
-    )
-    optRes_unscaled = np.max(
-        np.abs(
-            S[non_zero_indices]
-            - X_inv[non_zero_indices]
-            + lam * p * elementwise_product
-        )
-    )
-
-    optRes = optRes_unscaled * _dim
-    return optRes
-
 
 def lq_cov(
     S: np.ndarray, lambda_: float, q_f: float, max_iter=3000, tol=1e-4, warm_start=True
@@ -452,8 +414,7 @@ def lq_cov2(
 
                 # stop rule
                 if q_current == q_f:
-                    # f_val_list_out.append(objective_function(Omega, S, lambda_, q_current))
-                    f_val_list_out.append(objective_function2(Omega, S, lambda_, q_current))
+                    f_val_list_out.append(objective_function(Omega, S, lambda_, q_current))
 
                     non_zero_indices = np.where(np.abs(Omega) > NONZERO)
 
@@ -479,7 +440,7 @@ def lq_cov2(
 
 
                     optRes = optRes * p
-                    KKT_list.append(KKT_condition(S, Omega, Omega_inv, lambda_, q_f))
+                    KKT_list.append(optRes)
 
                     time_list.append(time.time() - start_time)
 
@@ -637,8 +598,7 @@ def lq_cov3(
 
                 # stop rule
                 if q_current == q_f:
-                    # f_val_list_out.append(objective_function(Omega, S, lambda_, q_current))
-                    f_val_list_out.append(objective_function2(Omega, S, lambda_, q_current))
+                    f_val_list_out.append(objective_function(Omega, S, lambda_, q_current))
 
                     non_zero_indices = np.where(np.abs(Omega) > NONZERO)
 
@@ -664,7 +624,7 @@ def lq_cov3(
 
 
                     optRes = optRes * p
-                    KKT_list.append(KKT_condition(S, Omega, Omega_inv, lambda_, q_f))
+                    KKT_list.append(optRes)
 
                     time_list.append(time.time() - start_time)
 

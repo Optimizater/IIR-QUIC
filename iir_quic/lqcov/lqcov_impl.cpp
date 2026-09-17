@@ -130,20 +130,6 @@ double LqCov::objective_function(const MatrixXd &Omega, const MatrixXd &S, doubl
     return -L;
 }
 
-// -log(det(Omega)) + trace(S @ Omega) + lambda * sum(abs(Omega) ** q)
-double LqCov::objective_function2(const MatrixXd &Omega, const MatrixXd &S,
-                                  double q) const
-{
-    Eigen::LLT<MatrixXd> llt(Omega);
-    double log_det = 2.0 * llt.matrixL().toDenseMatrix().diagonal().array().log().sum();
-    double trace = (Omega * S).trace();
-
-    double lq_term = lambda_ * Omega.array().abs().pow(q).sum();
-    double L = log_det - trace - lq_term;
-
-    return -L;
-}
-
 double LqCov::kkt_condition(const MatrixXd &Omega, const MatrixXd &Omega_inv,
                             const MatrixXd &S, double q, int p) const
 {
@@ -170,33 +156,6 @@ double LqCov::kkt_condition(const MatrixXd &Omega, const MatrixXd &Omega_inv,
                                           Omega(i, j));
                     optRes_unscaled = std::max(optRes_unscaled, std::abs(grad_ij));
                 }
-            }
-        }
-    }
-
-    double optRes = optRes_unscaled * p;
-
-    return optRes;
-}
-
-double LqCov::kkt_condition2(const MatrixXd &Omega, const MatrixXd &Omega_inv,
-                             const MatrixXd &S, double q, int p) const
-{
-    MatrixXd residual = S - Omega_inv;
-    double optRes_unscaled = 0.0;
-
-    for (int i = 0; i < p; ++i)
-    {
-        for (int j = 0; j < p; ++j)
-        {
-            if (std::abs(Omega(i, j)) > NONZERO)
-            {
-                double grad_ij =
-                    residual(i, j) +
-                    lambda_ * q *
-                        std::copysign(std::pow(std::abs(Omega(i, j)), q - 1),
-                                      Omega(i, j));
-                optRes_unscaled = std::max(optRes_unscaled, std::abs(grad_ij));
             }
         }
     }
@@ -472,8 +431,7 @@ MatrixXd LqCov::fit2(const MatrixXd &S, const MatrixXd &Omega_ini)
                 // Check convergence
                 if (std::abs(q_current - q_f) < NONZERO)
                 {
-                    // double f_val = objective_function(Omega, S, q_f);  // CHANGE: fun2
-                    double f_val = objective_function2(Omega, S, q_f);
+                    double f_val = objective_function(Omega, S, q_f);
                     f_val_list_out.push_back(f_val);
 
                     // MatrixXd residual = S - Omega_inv;
@@ -512,7 +470,7 @@ MatrixXd LqCov::fit2(const MatrixXd &S, const MatrixXd &Omega_ini)
 
                     double optRes = kkt_condition(Omega, Omega_inv, S, q_f, p);
 
-                    KKT_list.push_back(kkt_condition2(Omega, Omega_inv, S, q_f, p));  // CHANGE: kkt2
+                    KKT_list.push_back(optRes);
 
                     auto end_time = std::chrono::high_resolution_clock::now();
                     std::chrono::duration<double> elapsed_time = end_time - start_time;
@@ -700,8 +658,7 @@ MatrixXd LqCov::fit3(const MatrixXd &S, const MatrixXd &Omega_ini)
                 // Check convergence
                 if (std::abs(q_current - q_f) < NONZERO)
                 {
-                    // double f_val = objective_function(Omega, S, q_f);  // CHANGE: fun2
-                    double f_val = objective_function2(Omega, S, q_f);
+                    double f_val = objective_function(Omega, S, q_f);
                     f_val_list_out.push_back(f_val);
 
                     // MatrixXd residual = S - Omega_inv;
@@ -740,7 +697,7 @@ MatrixXd LqCov::fit3(const MatrixXd &S, const MatrixXd &Omega_ini)
 
                     double optRes = kkt_condition(Omega, Omega_inv, S, q_f, p);
 
-                    KKT_list.push_back(kkt_condition2(Omega, Omega_inv, S, q_f, p));  // CHANGE: kkt2
+                    KKT_list.push_back(optRes);
 
                     auto end_time = std::chrono::high_resolution_clock::now();
                     std::chrono::duration<double> elapsed_time = end_time - start_time;
